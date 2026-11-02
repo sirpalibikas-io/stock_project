@@ -5,16 +5,16 @@ WORKDIR /app
 # Install system dependencies
 RUN apt-get update && apt-get install -y build-essential
 
-# Copy requirements and install
+# Copy and install requirements
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy all project files
 COPY . .
 
-# Expose ports for FastAPI (8000) and Streamlit (8501)
+# Expose the ports Render uses
 EXPOSE 8000
 EXPOSE 8501
 
-# Command to run both FastAPI and Streamlit using a startup script
+# Run the startup script
 CMD ["bash", "start.sh"]
