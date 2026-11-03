@@ -75,10 +75,8 @@ if st.sidebar.button("Run Model Prediction"):
                 st.error(f"Not enough data for '{ticker}'. Need at least {seq_length} days.")
             else:
                 # Ensure we capture the 5 typical columns used in training: Open, High, Low, Close, Volume
-                # (Adjust column names if your notebook used specific indicators, typically these 5)
                 feature_columns = ['Open', 'High', 'Low', 'Close', 'Volume']
                 
-                # Check if all columns exist, otherwise fallback or map
                 available_cols = [col for col in feature_columns if col in df.columns]
                 
                 if len(available_cols) < 5:
@@ -102,7 +100,6 @@ if st.sidebar.button("Run Model Prediction"):
                             future_predictions_scaled.append(pred.item())
                             
                             # Create a dummy row for the next step prediction feedback loop
-                            # We replicate the last known feature row and replace the Close price (or target index) with prediction
                             next_row = current_seq[0, -1, :].clone().numpy()
                             next_row[3] = pred.item() # Assuming Close is index 3
                             
@@ -110,7 +107,6 @@ if st.sidebar.button("Run Model Prediction"):
                             current_seq = torch.cat((current_seq[:, 1:, :], new_pred_tensor), dim=1)
                     
                     # Inverse transform predictions back to price scale
-                    # Since scaler expects 5 columns, we pad the prediction column back to shape (N, 5) for inverse transform
                     dummy_matrix = np.zeros((len(future_predictions_scaled), 5))
                     dummy_matrix[:, 3] = future_predictions_scaled # Assuming Close is index 3
                     inv_transformed = scaler.inverse_transform(dummy_matrix)
@@ -144,6 +140,6 @@ if st.sidebar.button("Run Model Prediction"):
                     st.pyplot(fig)
                     
         except Exception as e:
-            st.error(f5"Prediction error: {e}")
+            st.error(f"Prediction error: {e}")
 else:
     st.info("Click **Run Model Prediction** on the sidebar to start forecasting.")
