@@ -9,18 +9,17 @@ import os
 import matplotlib.pyplot as plt
 
 # -------------------------------------------------------------
-# 1. PAGE SETUP & TITLE
+# 1. PAGE SETUP
 # -------------------------------------------------------------
 st.set_page_config(page_title="Stock Prediction Dashboard", page_icon="📈", layout="wide")
 st.title("📈 Live Stock Price Prediction Dashboard")
-st.write("Using pre-trained PyTorch LSTM model (`lstm_best.pt`) and `scaler.pkl` to forecast future prices.")
+st.write("Using pre-trained PyTorch LSTM model (`lstm_best.pt`) and `scaler.pkl`.")
 
 # -------------------------------------------------------------
-# 2. DEFINE MODEL ARCHITECTURE
-# (Must match the structure used during training in stock.ipynb)
+# 2. DEFINE MODEL ARCHITECTURE (Matches 5 Input Features)
 # -------------------------------------------------------------
 class StockLSTM(nn.Module):
-    def __init__(self, input_dim=1, hidden_dim=64, num_layers=2, output_dim=1):
+    def __init__(self, input_dim=5, hidden_dim=64, num_layers=2, output_dim=1):
         super(StockLSTM, self).__init__()
         self.lstm = nn.LSTM(input_dim, hidden_dim, num_layers, batch_first=True)
         self.fc = nn.Linear(hidden_dim, output_dim)
@@ -31,137 +30,120 @@ class StockLSTM(nn.Module):
         return out
 
 # -------------------------------------------------------------
-# 3. LOAD SCALER AND MODEL WEIGHTS
+# 3. LOAD ARTIFACTS SAFELY
 # -------------------------------------------------------------
 @st.cache_resource
 def load_artifacts():
     scaler_path = "scaler.pkl"
     model_path = "lstm_best.pt"
     
-    scaler = None
-    model = None
+    scaler = joblib.load(scaler_path) if os.path.exists(scaler_path) else None
     
-    # Load Scaler
-    if os.path.exists(scaler_path):
-        try:
-            scaler = joblib.load(scaler_path)
-        except Exception as e:
-            st.error(f"Error loading scaler.pkl: {e}")
-            
-    # Load PyTorch Weights
+    model = StockLSTM(input_dim=5)
     if os.path.exists(model_path):
         try:
-            model = StockLSTM()
             state_dict = torch.load(model_path, map_location=torch.device('cpu'))
-            
-            # Load weights (handles both full model save and state_dict)
-            if isinstance(state_dict, StockLSTM):
-                model = state_dict
-            else:
+            if isinstance(state_dict, dict) or 'OrderedDict' in str(type(state_dict)):
                 model.load_state_dict(state_dict)
+            else:
+                model = state_dict # In case full model was saved
             model.eval()
         except Exception as e:
-            # Fallback if state dict structure differs slightly
-            try:
-                model = torch.load(model_path, map_location=torch.device('cpu'))
-                model.eval()
-            except Exception as ex:
-                st.error(f"Error loading model weights: {ex}")
-                
+            st.error(f"Model load warning: {e}")
+            
     return model, scaler
 
 model, scaler = load_artifacts()
 
 # -------------------------------------------------------------
-# 4. SIDEBAR INPUTS
+# 4. SIDEBAR SETTINGS
 # -------------------------------------------------------------
 st.sidebar.header("Prediction Settings")
 ticker = st.sidebar.text_input("Stock Ticker", value="TCS.NS").upper()
 forecast_days = st.sidebar.slider("Days Ahead to Forecast", min_value=1, max_value=14, value=5)
-seq_length = 60  # Default lookback window length
+seq_length = 60
 
 # -------------------------------------------------------------
-# 5. PREDICTION LOGIC & DASHBOARD
+# 5. PREDICTION EXECUTION
 # -------------------------------------------------------------
 if st.sidebar.button("Run Model Prediction"):
-    with st.spinner(f"Fetching data and running inference for {ticker}..."):
+    with st.spinner(f"Fetching 5-feature data and running inference for {ticker}..."):
         try:
-            # Fetch 6 months of data for lookback sequence
             df = yf.Ticker(ticker).history(period="6mo")
             
             if df.empty or len(df) < seq_length:
-                st.error(f"Not enough data for ticker '{ticker}'. At least {seq_length} trading days needed.")
+                st.error(f"Not enough data for '{ticker}'. Need at least {seq_length} days.")
             else:
-                close_prices = df[['Close']].values
+                # Ensure we capture the 5 typical columns used in training: Open, High, Low, Close, Volume
+                # (Adjust column names if your notebook used specific indicators, typically these 5)
+                feature_columns = ['Open', 'High', 'Low', 'Close', 'Volume']
                 
-                # Check if artifacts exist
+                # Check if all columns exist, otherwise fallback or map
+                available_cols = [col for col in feature_columns if col in df.columns]
+                
+                if len(available_cols) < 5:
+                    st.warning(f"Found {len(available_cols)} columns, but scaler expects 5. Using available numerical data.")
+                
+                input_data = df[available_cols].values
+                
                 if scaler is None or model is None:
-                    st.warning("⚠️ `scaler.pkl` or `lstm_best.pt` file not found in repository root. Showing historical data only.")
+                    st.error("Missing `scaler.pkl` or `lstm_best.pt` in repository.")
                 else:
-                    # Step A: Scale the closing prices
-                    scaled_data = scaler.transform(close_prices)
+                    # Scale the 5 features
+                    scaled_data = scaler.transform(input_data)
                     
-                    # Step B: Prepare the lookback sequence (last N days)
                     last_sequence = scaled_data[-seq_length:]
-                    current_seq = torch.tensor(last_sequence, dtype=torch.float32).unsqueeze(0)  # Shape: (1, seq_length, 1)
+                    current_seq = torch.tensor(last_sequence, dtype=torch.float32).unsqueeze(0)
                     
-                    # Step C: Generate iterative future predictions
                     future_predictions_scaled = []
-                    
                     with torch.no_grad():
                         for _ in range(forecast_days):
-                            pred = model(current_seq) # Output shape: (1, 1)
+                            pred = model(current_seq)
                             future_predictions_scaled.append(pred.item())
                             
-                            # Update lookback sequence with new prediction
-                            new_pred_tensor = pred.unsqueeze(1) # Shape: (1, 1, 1)
+                            # Create a dummy row for the next step prediction feedback loop
+                            # We replicate the last known feature row and replace the Close price (or target index) with prediction
+                            next_row = current_seq[0, -1, :].clone().numpy()
+                            next_row[3] = pred.item() # Assuming Close is index 3
+                            
+                            new_pred_tensor = torch.tensor(next_row, dtype=torch.float32).unsqueeze(0).unsqueeze(0)
                             current_seq = torch.cat((current_seq[:, 1:, :], new_pred_tensor), dim=1)
                     
-                    # Step D: Inverse transform scaled predictions back to actual dollar amounts
-                    future_predictions_scaled = np.array(future_predictions_scaled).reshape(-1, 1)
-                    future_predictions = scaler.inverse_transform(future_predictions_scaled).flatten()
+                    # Inverse transform predictions back to price scale
+                    # Since scaler expects 5 columns, we pad the prediction column back to shape (N, 5) for inverse transform
+                    dummy_matrix = np.zeros((len(future_predictions_scaled), 5))
+                    dummy_matrix[:, 3] = future_predictions_scaled # Assuming Close is index 3
+                    inv_transformed = scaler.inverse_transform(dummy_matrix)
+                    future_prices = inv_transformed[:, 3]
                     
-                    # Step E: Build Future Dates index
                     last_date = df.index[-1]
                     future_dates = pd.date_range(start=last_date + pd.Timedelta(days=1), periods=forecast_days, freq='B')
                     
-                    # Metrics Display
+                    # Display Metrics
                     col1, col2, col3 = st.columns(3)
-                    latest_price = close_prices[-1][0]
-                    predicted_final = future_predictions[-1]
+                    latest_price = df['Close'].iloc[-1]
+                    predicted_final = future_prices[-1]
                     price_diff = predicted_final - latest_price
                     pct_diff = (price_diff / latest_price) * 100
                     
                     col1.metric("Current Close Price", f"${latest_price:.2f}")
                     col2.metric(f"Predicted Price ({forecast_days} Days)", f"${predicted_final:.2f}", delta=f"{price_diff:+.2f} ({pct_diff:+.2f}%)")
-                    col3.metric("Model Status", "Inference Active ✅")
+                    col3.metric("Status", "Inference Success ✅")
                     
-                    # Plotting Historical vs Predicted Chart
-                    st.subheader(f"📊 Historical Price + {forecast_days}-Day Forecast for {ticker}")
-                    
+                    # Plot Chart
+                    st.subheader(f"📊 {ticker} Forecast Chart")
                     fig, ax = plt.subplots(figsize=(12, 5))
+                    ax.plot(df.index[-60:], df['Close'].iloc[-60:], label="Historical Close", color="#1f77b4", linewidth=2)
                     
-                    # Plot recent 60 days historical price
-                    ax.plot(df.index[-60:], df['Close'].iloc[-60:], label="Historical Close Price", color="#1f77b4", linewidth=2)
-                    
-                    # Plot predictions starting from last historical point to forecast dates
                     forecast_x = [last_date] + list(future_dates)
-                    forecast_y = [latest_price] + list(future_predictions)
-                    ax.plot(forecast_x, forecast_y, label="PyTorch LSTM Forecast", color="#ff7f0e", linestyle="--", marker="o", linewidth=2)
+                    forecast_y = [latest_price] + list(future_prices)
+                    ax.plot(forecast_x, forecast_y, label="LSTM Forecast", color="#ff7f0e", linestyle="--", marker="o", linewidth=2)
                     
-                    ax.set_xlabel("Date")
-                    ax.set_ylabel("Price ($)")
                     ax.grid(True, linestyle="--", alpha=0.5)
                     ax.legend()
-                    
                     st.pyplot(fig)
                     
-                    # Show Prediction Data Table
-                    with st.expander("View Forecast Values Table"):
-                        forecast_df = pd.DataFrame({"Date": future_dates.strftime('%Y-%m-%d'), "Predicted Close Price": future_predictions})
-                        st.dataframe(forecast_df)
-                        
         except Exception as e:
-            st.error(f"Error during prediction execution: {e}")
+            st.error(f5"Prediction error: {e}")
 else:
-    st.info("Select options on the sidebar and click **Run Model Prediction** to start model inference.")
+    st.info("Click **Run Model Prediction** on the sidebar to start forecasting.")
