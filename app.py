@@ -12,11 +12,11 @@ import matplotlib.pyplot as plt
 # 1. PAGE SETUP
 # -------------------------------------------------------------
 st.set_page_config(page_title="Stock Prediction Dashboard", page_icon="📈", layout="wide")
-st.title("📈 Final PyTorch Stock Prediction Dashboard")
-st.write("Forecast future stock prices using your trained Deep Learning models and feature scalers.")
+st.title("📈 Final Stock Prediction Dashboard")
+st.write("Forecast future stock prices using your trained LSTM or ANN models.")
 
 # -------------------------------------------------------------
-# 2. DEFINE MODEL ARCHITECTURES (Matches 5 Input Features)
+# 2. DEFINE MODEL ARCHITECTURES
 # -------------------------------------------------------------
 class StockLSTM(nn.Module):
     def __init__(self, input_dim=5, hidden_dim=64, num_layers=2, output_dim=1):
@@ -30,19 +30,23 @@ class StockLSTM(nn.Module):
         return out
 
 class StockANN(nn.Module):
-    def __init__(self, input_dim=5, hidden_dim=64, output_dim=1):
+    def __init__(self, input_dim=5):
         super(StockANN, self).__init__()
-        self.fc1 = nn.Linear(input_dim, hidden_dim)
-        self.relu = nn.ReLU()
-        self.fc2 = nn.Linear(hidden_dim, output_dim)
+        # Matches Sequential layers at indices 0, 3, 6 from training
+        self.net = nn.Sequential(
+            nn.Linear(input_dim, 64),  # Index 0
+            nn.ReLU(),                  # Index 1
+            nn.Dropout(0.2),            # Index 2
+            nn.Linear(64, 32),          # Index 3
+            nn.ReLU(),                  # Index 4
+            nn.Dropout(0.2),            # Index 5
+            nn.Linear(32, 1)            # Index 6
+        )
 
     def forward(self, x):
         if len(x.shape) == 3:
-            x = x[:, -1, :] # Take the last timestep if sequence provided
-        out = self.fc1(x)
-        out = self.relu(out)
-        out = self.fc2(out)
-        return out
+            x = x[:, -1, :]  # Take the last timestep if sequence provided
+        return self.net(x)
 
 # -------------------------------------------------------------
 # 3. LOAD ARTIFACTS SAFELY
@@ -50,11 +54,12 @@ class StockANN(nn.Module):
 @st.cache_resource
 def load_artifacts(model_choice):
     scaler_path = "scaler.pkl"
-    model_file = "lstm_best.pt" if model_choice == "LSTM (lstm_best.pt)" else "ann_best.pt"
+    is_lstm = "LSTM" in model_choice
+    model_file = "lstm_best.pt" if is_lstm else "ann_best.pt"
     
     scaler = joblib.load(scaler_path) if os.path.exists(scaler_path) else None
     
-    if model_choice == "LSTM (lstm_best.pt)":
+    if is_lstm:
         model = StockLSTM(input_dim=5)
     else:
         model = StockANN(input_dim=5)
@@ -68,13 +73,8 @@ def load_artifacts(model_choice):
                 model = state_dict
             model.eval()
         except Exception as e:
-            st.warning(f"Could not load state dict directly for {model_file}, trying full load: {e}")
-            try:
-                model = torch.load(model_file, map_location=torch.device('cpu'))
-                model.eval()
-            except Exception as ex:
-                st.error(f"Error loading model: {ex}")
-                
+            st.error(f"Error loading {model_file}: {e}")
+            
     return model, scaler
 
 # -------------------------------------------------------------
@@ -82,16 +82,13 @@ def load_artifacts(model_choice):
 # -------------------------------------------------------------
 st.sidebar.header("⚙️ Dashboard Controls")
 
-# Model Choice
 model_selection = st.sidebar.selectbox(
     "Select Model Architecture", 
     ["LSTM (lstm_best.pt)", "ANN (ann_best.pt)"]
 )
 
-# Load selected model and scaler
 model, scaler = load_artifacts(model_selection)
 
-# Ticker Choice (Popular Options + Custom)
 ticker_option = st.sidebar.selectbox(
     "Select Stock Ticker", 
     ["AAPL (Apple)", "TSLA (Tesla)", "MSFT (Microsoft)", "GOOGL (Google)", "TCS.NS (TCS)", "Custom Input"]
@@ -114,17 +111,15 @@ if st.sidebar.button("Run Model Prediction"):
             df = yf.Ticker(ticker).history(period="6mo")
             
             if df.empty or len(df) < seq_length:
-                st.error(f"Not enough historical data found for '{ticker}'. Choose another ticker or increase timeframe.")
+                st.error(f"Not enough historical data found for '{ticker}'.")
             else:
                 feature_columns = ['Open', 'High', 'Low', 'Close', 'Volume']
                 available_cols = [col for col in feature_columns if col in df.columns]
-                
                 input_data = df[available_cols].values
                 
                 if scaler is None or model is None:
                     st.error("Missing `scaler.pkl` or model weight file in repository root.")
                 else:
-                    # Scale 5 features
                     scaled_data = scaler.transform(input_data)
                     
                     last_sequence = scaled_data[-seq_length:]
@@ -136,14 +131,12 @@ if st.sidebar.button("Run Model Prediction"):
                             pred = model(current_seq)
                             future_predictions_scaled.append(pred.item())
                             
-                            # Feedback loop for multi-step forecasting
                             next_row = current_seq[0, -1, :].clone().numpy()
                             next_row[3] = pred.item() # Assuming Close is index 3
                             
                             new_pred_tensor = torch.tensor(next_row, dtype=torch.float32).unsqueeze(0).unsqueeze(0)
                             current_seq = torch.cat((current_seq[:, 1:, :], new_pred_tensor), dim=1)
                     
-                    # Inverse transform predictions
                     dummy_matrix = np.zeros((len(future_predictions_scaled), 5))
                     dummy_matrix[:, 3] = future_predictions_scaled
                     inv_transformed = scaler.inverse_transform(dummy_matrix)
@@ -152,7 +145,6 @@ if st.sidebar.button("Run Model Prediction"):
                     last_date = df.index[-1]
                     future_dates = pd.date_range(start=last_date + pd.Timedelta(days=1), periods=forecast_days, freq='B')
                     
-                    # Metrics Display
                     col1, col2, col3 = st.columns(3)
                     latest_price = df['Close'].iloc[-1]
                     predicted_final = future_prices[-1]
@@ -163,7 +155,6 @@ if st.sidebar.button("Run Model Prediction"):
                     col2.metric(f"Predicted Price ({forecast_days} Days)", f"${predicted_final:.2f}", delta=f"{price_diff:+.2f} ({pct_diff:+.2f}%)")
                     col3.metric("Active Model", model_selection)
                     
-                    # Plotting Chart
                     st.subheader(f"📊 {ticker} Historical & Forecast Trend ({model_selection})")
                     fig, ax = plt.subplots(figsize=(12, 5))
                     ax.plot(df.index[-60:], df['Close'].iloc[-60:], label="Historical Close", color="#1f77b4", linewidth=2)
@@ -176,7 +167,6 @@ if st.sidebar.button("Run Model Prediction"):
                     ax.legend()
                     st.pyplot(fig)
                     
-                    # Data Table Expander
                     with st.expander("View Numerical Forecast Table"):
                         forecast_df = pd.DataFrame({
                             "Date": future_dates.strftime('%Y-%m-%d'), 
